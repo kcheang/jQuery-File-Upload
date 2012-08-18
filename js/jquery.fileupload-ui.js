@@ -151,8 +151,15 @@
                         that._transition($(this)).done(
                             function () {
                                 var node = $(this);
-                                template = that._renderDownload([file])
-                                    .replaceAll(node);
+                                if (file.error) {
+                                    template = node;
+                                    template.find('.status').html(that._renderError([file]));
+                                    template.find('.start, .cancel').remove();
+                                }
+                                else {
+                                    template = that._renderDownload([file])
+                                        .replaceAll(node);
+                                }
                                 that._forceReflow(template);
                                 that._transition(template).done(
                                     function () {
@@ -201,9 +208,9 @@
                                 true;
                             that._transition($(this)).done(
                                 function () {
-                                    var node = $(this);
-                                    template = that._renderDownload([file])
-                                        .replaceAll(node);
+                                    template = $(this);
+                                    template.find('.status').html(that._renderError([file]));
+                                    template.find('.start, .cancel').remove();
                                     that._forceReflow(template);
                                     that._transition(template).done(
                                         function () {
@@ -475,7 +482,7 @@
         _renderPreviews: function (files, nodes) {
             var that = this,
                 options = this.options;
-            nodes.find('.preview span').each(function (index, element) {
+            nodes.find('.preview div').each(function (index, element) {
                 var file = files[index];
                 if (options.previewSourceFileTypes.test(file.type) &&
                         ($.type(options.previewSourceMaxFileSize) !== 'number' ||
@@ -506,6 +513,13 @@
                 this.options.downloadTemplate,
                 files
             ).find('a[download]').each(this._enableDragToDesktop).end();
+        },
+
+        _renderError: function (files) {
+            return this._renderTemplate(
+                this.options.errorTemplate,
+                files
+            );
         },
 
         _startHandler: function (e) {
