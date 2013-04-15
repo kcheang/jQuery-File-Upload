@@ -1,6 +1,6 @@
 <?php
 /*
- * jQuery File Upload Plugin PHP Class 6.1
+ * jQuery File Upload Plugin PHP Class 6.4.1
  * https://github.com/blueimp/jQuery-File-Upload
  *
  * Copyright 2010, Sebastian Tschan
@@ -34,7 +34,7 @@ class UploadHandler
         'min_height' => 'Image requires a minimum height'
     );
 
-    function __construct($options = null, $initialize = true) {
+    function __construct($options = null, $initialize = true, $error_messages = null) {
         $this->options = array(
             'script_url' => $this->get_full_url().'/',
             'upload_dir' => dirname($_SERVER['SCRIPT_FILENAME']).'/files/',
@@ -101,6 +101,9 @@ class UploadHandler
                 ),
                 */
                 'thumbnail' => array(
+                    // Uncomment the following to force the max
+                    // dimensions and e.g. create square thumbnails:
+                    //'crop' => true,
                     'max_width' => 80,
                     'max_height' => 80
                 )
@@ -108,6 +111,9 @@ class UploadHandler
         );
         if ($options) {
             $this->options = array_merge($this->options, $options);
+        }
+        if ($error_messages) {
+            $this->error_messages = array_merge($this->error_messages, $error_messages);
         }
         if ($initialize) {
             $this->initialize();
@@ -166,9 +172,15 @@ class UploadHandler
             .$version_path.$file_name;
     }
 
+    protected function get_query_separator($url) {
+        return strpos($url, '?') === false ? '?' : '&';
+    }
+
     protected function get_download_url($file_name, $version = null) {
         if ($this->options['download_via_php']) {
-            $url = $this->options['script_url'].'?file='.rawurlencode($file_name);
+            $url = $this->options['script_url']
+                .$this->get_query_separator($this->options['script_url'])
+                .'file='.rawurlencode($file_name);
             if ($version) {
                 $url .= '&version='.rawurlencode($version);
             }
@@ -181,7 +193,8 @@ class UploadHandler
 
     protected function set_file_delete_properties($file) {
         $file->delete_url = $this->options['script_url']
-            .'?file='.rawurlencode($file->name);
+            .$this->get_query_separator($this->options['script_url'])
+            .'file='.rawurlencode($file->name);
         $file->delete_type = $this->options['delete_type'];
         if ($file->delete_type !== 'DELETE') {
             $file->delete_url .= '&_method=DELETE';
@@ -266,13 +279,19 @@ class UploadHandler
         } else {
             $new_file_path = $file_path;
         }
+        if (!function_exists('getimagesize')) {
+            error_log('Function not found: getimagesize');
+            return false;
+        }
         list($img_width, $img_height) = @getimagesize($file_path);
         if (!$img_width || !$img_height) {
             return false;
         }
+        $max_width = $options['max_width'];
+        $max_height = $options['max_height'];
         $scale = min(
-            $options['max_width'] / $img_width,
-            $options['max_height'] / $img_height
+            $max_width / $img_width,
+            $max_height / $img_height
         );
         if ($scale >= 1) {
             if ($file_path !== $new_file_path) {
@@ -280,9 +299,28 @@ class UploadHandler
             }
             return true;
         }
-        $new_width = $img_width * $scale;
-        $new_height = $img_height * $scale;
-        $new_img = @imagecreatetruecolor($new_width, $new_height);
+        if (!function_exists('imagecreatetruecolor')) {
+            error_log('Function not found: imagecreatetruecolor');
+            return false;
+        }
+        if (empty($options['crop'])) {
+            $new_width = $img_width * $scale;
+            $new_height = $img_height * $scale;
+            $dst_x = 0;
+            $dst_y = 0;
+            $new_img = @imagecreatetruecolor($new_width, $new_height);
+        } else {
+            if (($img_width / $img_height) >= ($max_width / $max_height)) {
+                $new_width = $img_width / ($img_height / $max_height);
+                $new_height = $max_height;
+            } else {
+                $new_width = $max_width;
+                $new_height = $img_height / ($img_width / $max_width);
+            }
+            $dst_x = 0 - ($new_width - $max_width) / 2;
+            $dst_y = 0 - ($new_height - $max_height) / 2;
+            $new_img = @imagecreatetruecolor($max_width, $max_height);
+        }
         switch (strtolower(substr(strrchr($file_name, '.'), 1))) {
             case 'jpg':
             case 'jpeg':
@@ -312,7 +350,10 @@ class UploadHandler
         $success = $src_img && @imagecopyresampled(
             $new_img,
             $src_img,
-            0, 0, 0, 0,
+            $dst_x,
+            $dst_y,
+            0,
+            0,
             $new_width,
             $new_height,
             $img_width,
@@ -349,7 +390,8 @@ class UploadHandler
             return false;
         }
         $content_length = $this->fix_integer_overflow(intval($_SERVER['CONTENT_LENGTH']));
-        if ($content_length > $this->get_config_bytes(ini_get('post_max_size'))) {
+        $post_max_size = $this->get_config_bytes(ini_get('post_max_size'));
+        if ($post_max_size && ($content_length > $post_max_size)) {
             $file->error = $this->get_error_message('post_max_size');
             return false;
         }
@@ -495,6 +537,38 @@ class UploadHandler
         return $success;
     }
 
+    protected function handle_image_file($file_path, $file) {
+        if ($this->options['orient_image']) {
+            $this->orient_image($file_path);
+        }
+        $failed_versions = array();
+        foreach($this->options['image_versions'] as $version => $options) {
+            if ($this->create_scaled_image($file->name, $version, $options)) {
+                if (!empty($version)) {
+                    $file->{$version.'_url'} = $this->get_download_url(
+                        $file->name,
+                        $version
+                    );
+                } else {
+                    $file->size = $this->get_file_size($file_path, true);
+                }
+            } else {
+                $failed_versions[] = $version;
+            }
+        }
+        switch (count($failed_versions)) {
+            case 0:
+                break;
+            case 1:
+                $file->error = 'Failed to create scaled version: '
+                    .$failed_versions[0];
+                break;
+            default:
+                $file->error = 'Failed to create scaled versions: '
+                    .implode($failed_versions,', ');
+        }
+    }
+
     protected function handle_file_upload($uploaded_file, $name, $size, $type, $error,
             $index = null, $content_range = null) {
         $file = new stdClass();
@@ -531,27 +605,18 @@ class UploadHandler
             }
             $file_size = $this->get_file_size($file_path, $append_file);
             if ($file_size === $file->size) {
-                if ($this->options['orient_image']) {
-                    $this->orient_image($file_path);
-                }
                 $file->url = $this->get_download_url($file->name);
-                foreach($this->options['image_versions'] as $version => $options) {
-                    if ($this->create_scaled_image($file->name, $version, $options)) {
-                        if (!empty($version)) {
-                            $file->{$version.'_url'} = $this->get_download_url(
-                                $file->name,
-                                $version
-                            );
-                        } else {
-                            $file_size = $this->get_file_size($file_path, true);
-                        }
-                    }
+                list($img_width, $img_height) = @getimagesize($file_path);
+                if (is_int($img_width)) {
+                    $this->handle_image_file($file_path, $file);
                 }
-            } else if (!$content_range && $this->options['discard_aborted_uploads']) {
-                unlink($file_path);
-                $file->error = 'abort';
+            } else {
+                $file->size = $file_size;
+                if (!$content_range && $this->options['discard_aborted_uploads']) {
+                    unlink($file_path);
+                    $file->error = 'abort';
+                }
             }
-            $file->size = $file_size;
             $this->set_file_delete_properties($file);
         }
         return $file;
